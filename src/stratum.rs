@@ -12,8 +12,8 @@ use url::Url;
 
 use crate::cli::Config;
 use crate::mining::{
-    parse_job_template, share_target_from_difficulty, MiningCoordinator, ShareSubmission,
-    Subscription,
+    apply_fudge_to_target, parse_job_template, share_target_from_difficulty, MiningCoordinator,
+    ShareSubmission, Subscription,
 };
 
 const SUBSCRIBE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -27,6 +27,8 @@ pub struct StratumClient {
     username: String,
     password: String,
     pending: HashMap<u64, PendingRequest>,
+    debug: bool,
+    fudge: f64,
 }
 
 enum PendingRequest {
@@ -50,6 +52,8 @@ impl StratumClient {
             .ok_or_else(|| anyhow!("pool URL must be provided"))?;
 
         let share_rx = coordinator.take_share_receiver()?;
+        let debug = config.debug;
+        let fudge = config.fudge;
 
         let parsed = Url::parse(&pool_url).context("invalid pool URL")?;
         if parsed.scheme() != "stratum+tcp" {
@@ -69,9 +73,13 @@ impl StratumClient {
         let (reader, writer) = stream.into_split();
         let mut writer = BufWriter::new(writer);
         let (outbound_tx, mut outbound_rx) = unbounded_channel::<String>();
+        let writer_debug = debug;
         tokio::spawn(async move {
             while let Some(msg) = outbound_rx.recv().await {
                 let write_res = async {
+                    if writer_debug {
+                        println!("[debug] -> {msg}");
+                    }
                     writer.write_all(msg.as_bytes()).await?;
                     writer.write_all(b"\n").await?;
                     writer.flush().await
@@ -84,6 +92,7 @@ impl StratumClient {
         });
 
         let (inbound_tx, inbound_rx) = unbounded_channel::<Value>();
+        let reader_debug = debug;
         tokio::spawn(async move {
             let mut reader = BufReader::new(reader);
             let mut line = String::new();
@@ -94,17 +103,20 @@ impl StratumClient {
                         let _ = inbound_tx.send(json!({ "type": "closed" }));
                         break;
                     }
-                    Ok(_) => match serde_json::from_str::<Value>(line.trim_end()) {
-                        Ok(value) => {
-                            let _ = inbound_tx.send(value);
+                    Ok(_) => {
+                        let text = line.trim_end();
+                        if reader_debug {
+                            println!("[debug] <- {text}");
                         }
-                        Err(err) => {
-                            eprintln!(
-                                "[stratum] failed to parse message: {err}: {}",
-                                line.trim_end()
-                            );
+                        match serde_json::from_str::<Value>(text) {
+                            Ok(value) => {
+                                let _ = inbound_tx.send(value);
+                            }
+                            Err(err) => {
+                                eprintln!("[stratum] failed to parse message: {err}: {text}");
+                            }
                         }
-                    },
+                    }
                     Err(err) => {
                         eprintln!("[stratum] read error: {err}");
                         break;
@@ -128,6 +140,8 @@ impl StratumClient {
             username,
             password,
             pending: HashMap::new(),
+            debug,
+            fudge,
         };
 
         client.perform_handshake().await?;
@@ -277,8 +291,15 @@ impl StratumClient {
                     let difficulty = diff_val
                         .as_f64()
                         .unwrap_or_else(|| diff_val.as_u64().unwrap_or(1) as f64);
-                    let target = share_target_from_difficulty(difficulty);
-                    println!("New difficulty set: {:.4}", difficulty);
+                    let base_target = share_target_from_difficulty(difficulty);
+                    let target = apply_fudge_to_target(base_target, self.fudge);
+                    let effective = difficulty / self.fudge;
+                    if self.debug {
+                        println!(
+                            "[debug] difficulty update reported={:.4} effective={:.4}",
+                            difficulty, effective
+                        );
+                    }
                     self.coordinator.update_share_target(target);
                 }
             }
@@ -339,8 +360,11 @@ impl StratumClient {
                     if target_bytes.len() == 32 {
                         let mut buf = [0u8; 32];
                         buf.copy_from_slice(&target_bytes);
-                        let target = Target::from_be_bytes(buf);
-                        println!("Share target override received");
+                        let base_target = Target::from_be_bytes(buf);
+                        let target = apply_fudge_to_target(base_target, self.fudge);
+                        if self.debug {
+                            println!("[debug] share target override received");
+                        }
                         self.coordinator.update_share_target(target);
                     }
                 }

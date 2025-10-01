@@ -25,6 +25,7 @@ cargo run --release -- \
 - `-t, --threads <N>`: Number of mining threads (defaults to available CPUs).
 - `--benchmark`: Run the hashing benchmark and exit.
 - `-D, --debug`: Print detailed debug output (including hash preimages when shares are found).
+- `-f, --fudge <FACTOR>`: Scale the pool difficulty/target before submitting shares (useful for debugging).
 
 ## Development Notes
 - The miner relies on the [`braidpool/rust-bitcoin`](https://github.com/braidpool/rust-bitcoin) fork, which

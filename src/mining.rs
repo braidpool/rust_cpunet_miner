@@ -95,7 +95,10 @@ impl MiningCoordinator {
         let shared = Arc::new(SharedState {
             inner: Mutex::new(StateInner {
                 subscription: None,
-                share_target: share_target_from_difficulty(1.0),
+                share_target: apply_fudge_to_target(
+                    share_target_from_difficulty(1.0),
+                    config.fudge,
+                ),
                 active_job: None,
                 pending_template: None,
                 shutting_down: false,
@@ -167,11 +170,13 @@ impl MiningCoordinator {
 
     pub fn update_share_target(&self, target: Target) {
         let debug = self.inner.config.debug;
+        let fudge = self.inner.config.fudge;
         let mut guard = self.inner.shared.inner.lock().unwrap();
-        guard.share_target = target;
+        let adjusted = apply_fudge_to_target(target, fudge);
+        guard.share_target = adjusted;
         if let Some(job) = guard.active_job.take() {
             if let Some(subscription) = guard.subscription.clone() {
-                let new_job = JobContext::new(job.template.clone(), subscription, target, debug);
+                let new_job = JobContext::new(job.template.clone(), subscription, adjusted, debug);
                 guard.active_job = Some(Arc::new(new_job));
             }
         }
@@ -287,7 +292,7 @@ fn mine_job(
                     job_id: job_id.clone(),
                     extranonce2: extranonce2_hex.clone(),
                     ntime: ntime.clone(),
-                    nonce: format!("{nonce:08x}"),
+                    nonce: format!("{:08x}", nonce.swap_bytes()),
                     hash,
                     is_block_candidate: is_block,
                 };
@@ -335,12 +340,16 @@ fn encode_header_bytes(
     nonce: u32,
 ) -> [u8; 80] {
     let mut bytes = [0u8; 80];
-    bytes[..4].copy_from_slice(&version.to_consensus().to_le_bytes());
+    bytes[..4].copy_from_slice(&version.to_consensus().to_be_bytes());
     bytes[4..36].copy_from_slice(prevhash.as_byte_array());
-    bytes[36..68].copy_from_slice(merkle_root.as_byte_array());
-    bytes[68..72].copy_from_slice(&ntime.to_le_bytes());
-    bytes[72..76].copy_from_slice(&compact.to_consensus().to_le_bytes());
-    bytes[76..80].copy_from_slice(&nonce.to_le_bytes());
+    let mut merkle_bytes = merkle_root.to_byte_array();
+    for chunk in merkle_bytes.chunks_exact_mut(4) {
+        chunk.reverse();
+    }
+    bytes[36..68].copy_from_slice(&merkle_bytes);
+    bytes[68..72].copy_from_slice(&ntime.to_be_bytes());
+    bytes[72..76].copy_from_slice(&compact.to_consensus().to_be_bytes());
+    bytes[76..80].copy_from_slice(&nonce.to_be_bytes());
     bytes
 }
 
@@ -488,8 +497,8 @@ pub fn parse_job_template(
         .map(|s| hex::decode(s).context("invalid merkle branch hex"))
         .collect::<Result<Vec<_>>>()?;
 
-    let version_u32 = u32::from_str_radix(version, 16).context("invalid version hex")?;
-    let version = Version::from_consensus(i32::from_le_bytes(version_u32.to_le_bytes()));
+    let version_i32 = i32::from_str_radix(version, 16).context("invalid version hex")?;
+    let version = Version::from_consensus(version_i32);
     let nbits_u32 = u32::from_str_radix(nbits, 16).context("invalid nbits hex")?;
     let compact_target = CompactTarget::from_consensus(nbits_u32);
     let ntime_u32 = u32::from_str_radix(ntime, 16).context("invalid ntime hex")?;
@@ -526,6 +535,25 @@ pub fn share_target_from_difficulty(difficulty: f64) -> Target {
     let target_int = target_rat.floor().to_integer();
     let target_uint = target_int.to_biguint().unwrap_or_else(BigUint::zero);
     target_from_biguint(&target_uint)
+}
+
+pub fn apply_fudge_to_target(target: Target, fudge: f64) -> Target {
+    if !fudge.is_finite() || fudge <= 0.0 {
+        return target;
+    }
+    if (fudge - 1.0).abs() < f64::EPSILON {
+        return target;
+    }
+
+    let base = BigUint::from_bytes_be(&target.to_be_bytes());
+    let factor = match BigRational::from_float(fudge) {
+        Some(f) => f,
+        None => return target,
+    };
+    let scaled = BigRational::from_integer(BigInt::from(base)) * factor;
+    let scaled_int = scaled.floor().to_integer();
+    let scaled_uint = scaled_int.to_biguint().unwrap_or_else(BigUint::zero);
+    target_from_biguint(&scaled_uint)
 }
 
 fn target_from_biguint(value: &BigUint) -> Target {

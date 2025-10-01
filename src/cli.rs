@@ -26,6 +26,15 @@ pub struct Cli {
     /// Enable verbose debug output
     #[arg(short = 'D', long = "debug")]
     pub debug: bool,
+
+    /// Divide the reported pool difficulty by this factor before submitting shares
+    #[arg(
+        short = 'f',
+        long = "fudge",
+        value_name = "FACTOR",
+        default_value_t = 1.0
+    )]
+    pub fudge: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -36,6 +45,7 @@ pub struct Config {
     pub threads: NonZeroUsize,
     pub benchmark: bool,
     pub debug: bool,
+    pub fudge: f64,
 }
 
 impl Cli {
@@ -77,6 +87,10 @@ impl Cli {
             }
         }
 
+        if self.fudge <= 0.0 || !self.fudge.is_finite() {
+            return Err(anyhow!("fudge factor (-f/--fudge) must be positive"));
+        }
+
         Ok(Config {
             pool_url: self.pool_url,
             username,
@@ -84,6 +98,7 @@ impl Cli {
             threads,
             benchmark: self.benchmark,
             debug: self.debug,
+            fudge: self.fudge,
         })
     }
 }
