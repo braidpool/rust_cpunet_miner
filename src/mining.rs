@@ -4,10 +4,12 @@ use std::thread;
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
+use bitcoin::block::Header as BlockHeader;
 use bitcoin::block::Version;
 use bitcoin::hash_types::{BlockHash, TxMerkleNode};
 use bitcoin::hashes::{sha256, sha256d};
 use bitcoin::pow::{CompactTarget, Target};
+use bitcoin::BlockTime;
 use num_bigint::{BigInt, BigUint};
 use num_rational::BigRational;
 use num_traits::Zero;
@@ -38,8 +40,7 @@ pub struct JobTemplate {
     pub coinbase2: Vec<u8>,
     pub merkle_branch: Vec<Vec<u8>>,
     pub compact_target: CompactTarget,
-    pub ntime: u32,
-    pub ntime_str: String,
+    pub ntime: BlockTime,
     pub clean_jobs: bool,
     pub network_target: Target,
 }
@@ -262,7 +263,7 @@ fn mine_job(
         let share_target = job.share_target;
         let network_target = job.template.network_target;
         let extranonce2_hex = hex::encode(&extranonce2);
-        let ntime = job.template.ntime_str.clone();
+        let ntime = job.template.ntime.clone();
         let job_id = job.template.job_id.clone();
 
         let mut nonce: u32 = 0;
@@ -282,7 +283,7 @@ fn mine_job(
                     preimage.extend_from_slice(&header);
                     preimage.extend_from_slice(CPUNET_SUFFIX);
                     println!(
-                        "[debug] Found share hash={} preimage={} block_candidate={}",
+                        "[debug] Found share hash: {} preimage: {} block_candidate: {}",
                         hex::encode(hash),
                         hex::encode(&preimage),
                         is_block
@@ -291,8 +292,8 @@ fn mine_job(
                 let submission = ShareSubmission {
                     job_id: job_id.clone(),
                     extranonce2: extranonce2_hex.clone(),
-                    ntime: ntime.clone(),
-                    nonce: format!("{:08x}", nonce.swap_bytes()),
+                    ntime: format!("{:08x}", ntime.to_u32()),
+                    nonce: format!("{:08x}", nonce),
                     hash,
                     is_block_candidate: is_block,
                 };
@@ -309,14 +310,15 @@ fn mine_job(
 fn prepare_work(job: &JobContext, extranonce2: &[u8]) -> Result<WorkUnit> {
     let coinbase = build_coinbase(&job.template, &job.subscription.extranonce1, extranonce2);
     let merkle_root = compute_merkle_root(&coinbase, &job.template.merkle_branch)?;
-    let header_bytes = encode_header_bytes(
-        job.template.version,
-        job.template.prevhash,
+    let header = BlockHeader {
+        version: job.template.version,
+        prev_blockhash: job.template.prevhash,
         merkle_root,
-        job.template.ntime,
-        job.template.compact_target,
-        0,
-    );
+        time: job.template.ntime,
+        bits: job.template.compact_target,
+        nonce: 0,
+    };
+    let header_bytes = bitcoin::consensus::serialize(&header);
     let mut prefix = [0u8; 64];
     prefix.copy_from_slice(&header_bytes[..64]);
     let mut tail = [0u8; 16];
@@ -329,28 +331,6 @@ fn prepare_work(job: &JobContext, extranonce2: &[u8]) -> Result<WorkUnit> {
         extranonce2: extranonce2.to_vec(),
         prefix,
     })
-}
-
-fn encode_header_bytes(
-    version: Version,
-    prevhash: BlockHash,
-    merkle_root: TxMerkleNode,
-    ntime: u32,
-    compact: CompactTarget,
-    nonce: u32,
-) -> [u8; 80] {
-    let mut bytes = [0u8; 80];
-    bytes[..4].copy_from_slice(&version.to_consensus().to_be_bytes());
-    bytes[4..36].copy_from_slice(prevhash.as_byte_array());
-    let mut merkle_bytes = merkle_root.to_byte_array();
-    for chunk in merkle_bytes.chunks_exact_mut(4) {
-        chunk.reverse();
-    }
-    bytes[36..68].copy_from_slice(&merkle_bytes);
-    bytes[68..72].copy_from_slice(&ntime.to_be_bytes());
-    bytes[72..76].copy_from_slice(&compact.to_consensus().to_be_bytes());
-    bytes[76..80].copy_from_slice(&nonce.to_be_bytes());
-    bytes
 }
 
 fn build_coinbase(template: &JobTemplate, extranonce1: &[u8], extranonce2: &[u8]) -> Vec<u8> {
@@ -487,6 +467,9 @@ pub fn parse_job_template(
     }
     let mut prevhash_array = [0u8; 32];
     prevhash_array.copy_from_slice(&prevhash_bytes);
+    for chunk in prevhash_array.chunks_exact_mut(4) {
+        chunk.reverse();
+    }
     let prevhash = BlockHash::from_byte_array(prevhash_array);
 
     let coinbase1 = hex::decode(coinbase1).context("invalid coinbase1 hex")?;
@@ -502,6 +485,7 @@ pub fn parse_job_template(
     let nbits_u32 = u32::from_str_radix(nbits, 16).context("invalid nbits hex")?;
     let compact_target = CompactTarget::from_consensus(nbits_u32);
     let ntime_u32 = u32::from_str_radix(ntime, 16).context("invalid ntime hex")?;
+    let ntime = BlockTime::from_u32(ntime_u32);
 
     let network_target = Target::from_compact(compact_target);
 
@@ -513,8 +497,7 @@ pub fn parse_job_template(
         coinbase2,
         merkle_branch,
         compact_target,
-        ntime: ntime_u32,
-        ntime_str: ntime.to_string(),
+        ntime: ntime,
         clean_jobs,
         network_target,
     })
@@ -577,35 +560,65 @@ fn target_from_biguint(value: &BigUint) -> Target {
 mod tests {
     use super::*;
     use bitcoin::block::Header as BlockHeader;
+    use bitcoin::consensus::encode::serialize;
     use bitcoin::BlockTime;
+    use std::convert::TryInto;
+    use std::str::FromStr;
 
     #[test]
     fn midstate_hash_matches_block_header() {
-        let version = Version::from_consensus(2);
-        let prevhash = BlockHash::from_byte_array([0u8; 32]);
-        let merkle_root = TxMerkleNode::from_byte_array([1u8; 32]);
-        let ntime = 0x5b8d80b3;
+        let version = Version::from_consensus(0x20000000);
+        let prevhash =
+            BlockHash::from_str("00000000bbffa57733938dbc05f86239f303636de4599905ab84bccfa909f49b")
+                .expect("valid previous block hash");
+        let merkle_root = TxMerkleNode::from_str(
+            "45568d636e5c851bf0acd895b394f2abc40f62b91173613ff263da72aeae5b11",
+        )
+        .expect("valid merkle root");
+        let ntime = 1723652722;
         let compact = CompactTarget::from_consensus(0x1d00ffff);
+        let nonce = 2718237372;
 
-        let header_bytes = encode_header_bytes(version, prevhash, merkle_root, ntime, compact, 0);
-        let mut prefix = [0u8; 64];
-        prefix.copy_from_slice(&header_bytes[..64]);
-        let mut tail = [0u8; 16];
-        tail.copy_from_slice(&header_bytes[64..80]);
-        let midstate = midstate_from_prefix(&prefix);
-        let hash_bytes = hash_from_midstate(&midstate, &tail, CPUNET_SUFFIX);
-
-        let expected = BlockHeader {
+        let expected_header = BlockHeader {
             version,
             prev_blockhash: prevhash,
             merkle_root,
             time: BlockTime::from_u32(ntime),
             bits: compact,
-            nonce: 0,
-        }
-        .block_hash();
+            nonce,
+        };
+        let expected_cpunet_hash =
+            BlockHash::from_str("0000000086006c60cb448978c2b6b8e2d3917b3ea01f53ee89eed0607fed24d1")
+                .expect("valid cpunet block hash");
+        let header_bytes: [u8; 80] = serialize(&expected_header)
+            .try_into()
+            .expect("serialized header must be 80 bytes");
+        let mut prefix = [0u8; 64];
+        prefix.copy_from_slice(&header_bytes[..64]);
+        let mut tail = [0u8; 16];
+        tail.copy_from_slice(&header_bytes[64..80]);
+        let midstate = midstate_from_prefix(&prefix);
+        let hash_bytes_no_suffix = hash_from_midstate(&midstate, &tail, &[]);
+        assert_eq!(
+            BlockHash::from_byte_array(hash_bytes_no_suffix),
+            BlockHash::from_byte_array(sha256d::Hash::hash(&header_bytes).to_byte_array())
+        );
 
-        assert_eq!(BlockHash::from_byte_array(hash_bytes), expected);
+        let hash_bytes_with_suffix = hash_from_midstate(&midstate, &tail, CPUNET_SUFFIX);
+        let mut header_with_suffix = Vec::from(header_bytes);
+        header_with_suffix.extend_from_slice(CPUNET_SUFFIX);
+        let expected_with_suffix = sha256d::Hash::hash(&header_with_suffix);
+        assert_eq!(
+            BlockHash::from_byte_array(hash_bytes_with_suffix),
+            expected_cpunet_hash
+        );
+        assert_eq!(
+            expected_cpunet_hash,
+            BlockHash::from_byte_array(expected_with_suffix.to_byte_array())
+        );
+        assert_eq!(expected_cpunet_hash, expected_header.block_hash());
+        println!("expected header: {:?}", expected_header);
+        println!("expected cpunet hash: {:?}", expected_cpunet_hash);
     }
 
     #[test]
