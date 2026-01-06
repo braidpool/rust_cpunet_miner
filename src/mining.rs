@@ -13,6 +13,8 @@ use bitcoin::BlockTime;
 use num_bigint::{BigInt, BigUint};
 use num_rational::BigRational;
 use num_traits::Zero;
+use serde::Serialize;
+use serde_json::json;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 
 use crate::cli::Config;
@@ -65,6 +67,23 @@ struct SharedState {
     inner: Mutex<StateInner>,
     notify: Condvar,
     version: AtomicU64,
+    // total hashes counted since last sample (worker threads increment)
+    hash_count: AtomicU64,
+    // last computed hashes-per-second
+    hashrate: AtomicU64,
+}
+
+// add counters for hashrate reporting
+impl SharedState {
+    fn new(inner: StateInner) -> Self {
+        SharedState {
+            inner: Mutex::new(inner),
+            notify: Condvar::new(),
+            version: AtomicU64::new(0),
+            hash_count: AtomicU64::new(0),
+            hashrate: AtomicU64::new(0),
+        }
+    }
 }
 
 struct StateInner {
@@ -73,6 +92,13 @@ struct StateInner {
     active_job: Option<Arc<JobContext>>,
     pending_template: Option<JobTemplate>,
     shutting_down: bool,
+}
+
+#[derive(Serialize)]
+pub struct JobInfo {
+    pub job_id: String,
+    pub ntime: u32,
+    pub clean_jobs: bool,
 }
 
 struct JobContext {
@@ -106,6 +132,8 @@ impl MiningCoordinator {
             }),
             notify: Condvar::new(),
             version: AtomicU64::new(0),
+            hash_count: AtomicU64::new(0),
+            hashrate: AtomicU64::new(0),
         });
 
         let coordinator = MiningCoordinator {
@@ -135,6 +163,18 @@ impl MiningCoordinator {
                 .name(format!("miner-{id}"))
                 .spawn(move || worker_loop(id, shared, share_tx))
                 .map_err(|e| anyhow!("failed to spawn worker thread: {e}"))?;
+            workers.push(handle);
+        }
+        {
+            let shared = self.inner.shared.clone();
+            let handle = thread::Builder::new()
+                .name("hashrate-sampler".to_string())
+                .spawn(move || loop {
+                    let delta = shared.hash_count.swap(0, Ordering::Relaxed);
+                    shared.hashrate.store(delta, Ordering::Relaxed);
+                    thread::sleep(Duration::from_secs(1));
+                })
+                .map_err(|e| anyhow!("failed to spawn sampler thread: {e}"))?;
             workers.push(handle);
         }
         Ok(())
@@ -201,6 +241,98 @@ impl MiningCoordinator {
     fn bump_version(&self) {
         self.inner.shared.version.fetch_add(1, Ordering::SeqCst);
         self.inner.shared.notify.notify_all();
+    }
+
+    pub fn status(&self) -> &'static str {
+        let guard: std::sync::MutexGuard<'_, StateInner> = self.inner.shared.inner.lock().unwrap();
+        if guard.shutting_down {
+            "shutting_down"
+        } else if guard.pending_template.is_some() {
+            "mining"
+        } else {
+            "idle"
+        }
+    }
+
+    /// Hashrate in kilo-hashes/sec
+    pub fn hashrate_khs(&self) -> f64 {
+        let raw = self.inner.shared.hashrate.load(Ordering::Relaxed);
+        raw as f64 / 1_000.0
+    }
+
+    ///  job count
+    pub fn jobs(&self) -> usize {
+        let guard = self.inner.shared.inner.lock().unwrap();
+        guard.pending_template.iter().count()
+    }
+
+   
+    pub fn info(&self) -> serde_json::Value {
+        let status = self.status();
+        let hashrate_khs = self.hashrate_khs();
+        let jobs = self.jobs();
+
+        let version = self.inner.shared.version.load(Ordering::Relaxed);
+        let hash_count = self.inner.shared.hash_count.load(Ordering::Relaxed);
+        let raw_hashrate = self.inner.shared.hashrate.load(Ordering::Relaxed);
+
+        let config = &self.inner.config;
+        let threads = config.threads.get();
+
+        let workers_len = {
+            let workers = self.inner.workers.lock().unwrap();
+            workers.len()
+        };
+
+        let (share_target_hex, subscription_json, pending_template, shutting_down) = {
+            let guard = self.inner.shared.inner.lock().unwrap();
+
+            let share_target_hex = hex::encode(guard.share_target.to_be_bytes());
+
+            let subscription_json = guard.subscription.as_ref().map(|s| {
+                json!({
+                    "extranonce1": hex::encode(&s.extranonce1),
+                    "extranonce2_size": s.extranonce2_size,
+                })
+            });
+
+            (
+                share_target_hex,
+                subscription_json,
+                guard.pending_template.is_some(),
+                guard.shutting_down,
+            )
+        };
+
+        json!({
+            "status": status,
+            "hashrate_khs": hashrate_khs,
+            "jobs": jobs,
+
+            "config": {
+                "threads": threads,
+                "debug": config.debug,
+                "fudge": config.fudge,
+                "benchmark": config.benchmark,
+                "pool_url": config.pool_url,
+                "http_port": config.http_port,
+            },
+
+            "workers": workers_len,
+
+            "protocol": {
+                "share_target": share_target_hex,
+                "subscription": subscription_json,
+                "pending_template": pending_template,
+                "shutting_down": shutting_down,
+            },
+
+            "metrics": {
+                "version": version,
+                "hash_count": hash_count,
+                "raw_hashrate": raw_hashrate,
+            }
+        })
     }
 }
 
@@ -273,6 +405,7 @@ fn mine_job(
             }
             set_nonce(&mut tail, nonce);
             let hash = hash_from_midstate(&midstate, &tail, CPUNET_SUFFIX);
+            shared.hash_count.fetch_add(1, Ordering::Relaxed);
             if hash_meets_target(&hash, share_target) {
                 let is_block = hash_meets_target(&hash, network_target);
                 if job.debug {

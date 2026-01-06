@@ -35,6 +35,8 @@ pub struct Cli {
         default_value_t = 1.0
     )]
     pub fudge: f64,
+    #[arg(long = "http-port", value_name = "PORT")]
+    pub http_port: Option<u16>,
 }
 
 #[derive(Debug, Clone)]
@@ -46,6 +48,7 @@ pub struct Config {
     pub benchmark: bool,
     pub debug: bool,
     pub fudge: f64,
+    pub http_port: Option<u16>,
 }
 
 impl Cli {
@@ -99,6 +102,7 @@ impl Cli {
             benchmark: self.benchmark,
             debug: self.debug,
             fudge: self.fudge,
+            http_port: self.http_port,
         })
     }
 }
