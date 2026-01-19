@@ -35,6 +35,18 @@ pub struct Cli {
         default_value_t = 1.0
     )]
     pub fudge: f64,
+
+    /// Port for the HTTP API server 
+    #[arg(long = "api-port", value_name = "PORT", default_value_t = 8080)]
+    pub api_port: u16,
+    #[arg(long = "api-bind", value_name = "ADDRESS", default_value = "0.0.0.0")]
+    pub api_bind: String,
+    #[arg(long = "share-history", value_name = "COUNT", default_value_t = 100)]
+    pub share_history_size: usize,
+    #[arg(long = "bench-duration", value_name = "SECONDS", default_value_t = 5)]
+    pub benchmark_duration: u64,
+    #[arg(long = "pool-timeout", value_name = "SECONDS", default_value_t = 10)]
+    pub pool_timeout: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -46,6 +58,11 @@ pub struct Config {
     pub benchmark: bool,
     pub debug: bool,
     pub fudge: f64,
+    pub api_port: u16,
+    pub api_bind: String,
+    pub share_history_size: usize,
+    pub benchmark_duration: u64,
+    pub pool_timeout: u64,
 }
 
 impl Cli {
@@ -99,6 +116,11 @@ impl Cli {
             benchmark: self.benchmark,
             debug: self.debug,
             fudge: self.fudge,
+            api_port: self.api_port,
+            api_bind: self.api_bind,
+            share_history_size: self.share_history_size,
+            benchmark_duration: self.benchmark_duration,
+            pool_timeout: self.pool_timeout,
         })
     }
 }

@@ -13,10 +13,12 @@ use bitcoin::BlockTime;
 use num_bigint::{BigInt, BigUint};
 use num_rational::BigRational;
 use num_traits::Zero;
+use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 
 use crate::cli::Config;
 use crate::hashing::{hash_from_midstate, midstate_from_prefix, CPUNET_SUFFIX};
+use crate::stats::MiningStats;
 
 #[derive(Clone)]
 pub struct MiningCoordinator {
@@ -29,9 +31,11 @@ struct CoordinatorInner {
     share_tx: UnboundedSender<ShareSubmission>,
     share_rx: Mutex<Option<UnboundedReceiver<ShareSubmission>>>,
     workers: Mutex<Vec<thread::JoinHandle<()>>>,
+    stats: MiningStats,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct JobTemplate {
     pub job_id: String,
     pub version: Version,
@@ -45,13 +49,15 @@ pub struct JobTemplate {
     pub network_target: Target,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Subscription {
     pub extranonce1: Vec<u8>,
     pub extranonce2_size: usize,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ShareSubmission {
     pub job_id: String,
     pub extranonce2: String,
@@ -108,6 +114,11 @@ impl MiningCoordinator {
             version: AtomicU64::new(0),
         });
 
+        let pool_url = config.pool_url.clone().unwrap_or_else(|| "unknown".to_string());
+        let username = config.username.clone().unwrap_or_else(|| "miner".to_string());
+        let threads = config.threads.get();
+        let stats = MiningStats::new(pool_url, username, threads, config.share_history_size);
+
         let coordinator = MiningCoordinator {
             inner: Arc::new(CoordinatorInner {
                 config: config.clone(),
@@ -115,6 +126,7 @@ impl MiningCoordinator {
                 share_tx,
                 share_rx: Mutex::new(Some(share_rx)),
                 workers: Mutex::new(Vec::new()),
+                stats,
             }),
         };
 
@@ -153,6 +165,7 @@ impl MiningCoordinator {
         let debug = self.inner.config.debug;
         let mut guard = self.inner.shared.inner.lock().unwrap();
         guard.subscription = Some(subscription.clone());
+        self.inner.stats.update_subscription(subscription.clone());
         if let Some(job) = guard.active_job.take() {
             let new_job = JobContext::new(
                 job.template.clone(),
@@ -188,6 +201,7 @@ impl MiningCoordinator {
     pub fn install_job(&self, template: JobTemplate) {
         let debug = self.inner.config.debug;
         let mut guard = self.inner.shared.inner.lock().unwrap();
+        self.inner.stats.update_job(template.clone());
         if let Some(subscription) = guard.subscription.clone() {
             let job = JobContext::new(template, subscription, guard.share_target, debug);
             guard.active_job = Some(Arc::new(job));
@@ -201,6 +215,15 @@ impl MiningCoordinator {
     fn bump_version(&self) {
         self.inner.shared.version.fetch_add(1, Ordering::SeqCst);
         self.inner.shared.notify.notify_all();
+    }
+
+    pub fn get_stats(&self) -> &MiningStats {
+        &self.inner.stats
+    }
+
+    pub fn get_stats_json(&self) -> Result<String> {
+        self.inner.stats.get_json()
+            .map_err(|e| anyhow!("failed to serialize stats: {}", e))
     }
 }
 
@@ -435,7 +458,7 @@ pub async fn benchmark(config: &Config) -> Result<()> {
         handles.push(handle);
     }
 
-    let duration = Duration::from_secs(5);
+    let duration = Duration::from_secs(config.benchmark_duration);
     tokio::time::sleep(duration).await;
     stop_flag.store(true, Ordering::Relaxed);
 
