@@ -40,7 +40,7 @@ async fn main() -> Result<()> {
             stratum.run().await
         }
         Err(e) => {
-            // Connection failed, but keep API server running
+            // if Connection failed, but keep API server running
             eprintln!("Warning: Failed to connect to pool: {}", e);
             eprintln!("API server is still running on http://{}:{}", api_bind, api_port);
             api_handle.await.map_err(|e| anyhow::anyhow!("API server task failed: {}", e))?;
