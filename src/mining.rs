@@ -144,9 +144,10 @@ impl MiningCoordinator {
         for id in 0..thread_count {
             let shared = self.inner.shared.clone();
             let share_tx = self.inner.share_tx.clone();
+            let stats = self.inner.stats.clone();
             let handle = thread::Builder::new()
                 .name(format!("miner-{id}"))
-                .spawn(move || worker_loop(id, shared, share_tx))
+                .spawn(move || worker_loop(id, shared, share_tx, stats))
                 .map_err(|e| anyhow!("failed to spawn worker thread: {e}"))?;
             workers.push(handle);
         }
@@ -222,6 +223,7 @@ impl MiningCoordinator {
         &self.inner.stats
     }
 
+    #[allow(dead_code)]
     pub fn get_stats_json(&self) -> Result<String> {
         self.inner.stats.get_json()
             .map_err(|e| anyhow!("failed to serialize stats: {}", e))
@@ -232,7 +234,7 @@ impl MiningCoordinator {
     }
 }
 
-fn worker_loop(id: usize, shared: Arc<SharedState>, share_tx: UnboundedSender<ShareSubmission>) {
+fn worker_loop(id: usize, shared: Arc<SharedState>, share_tx: UnboundedSender<ShareSubmission>, stats: MiningStats) {
     let mut seen_version = shared.version.load(Ordering::SeqCst);
     loop {
         let (job, job_version) = {
@@ -252,7 +254,7 @@ fn worker_loop(id: usize, shared: Arc<SharedState>, share_tx: UnboundedSender<Sh
             }
         };
 
-        if let Err(err) = mine_job(id, job, job_version, &shared, &share_tx) {
+        if let Err(err) = mine_job(id, job, job_version, &shared, &share_tx, &stats) {
             eprintln!("[worker {id}] mining error: {err:?}");
             thread::sleep(Duration::from_secs(1));
         }
@@ -265,6 +267,7 @@ fn mine_job(
     job_version: u64,
     shared: &Arc<SharedState>,
     share_tx: &UnboundedSender<ShareSubmission>,
+    stats: &MiningStats,
 ) -> Result<()> {
     loop {
         if shared.version.load(Ordering::SeqCst) != job_version {
@@ -295,8 +298,14 @@ fn mine_job(
         let job_id = job.template.job_id.clone();
 
         let mut nonce: u32 = 0;
+        let mut hashes_this_batch: u64 = 0;
+        const BATCH_SIZE: u64 = 1_000_000; 
+        
         loop {
             if shared.version.load(Ordering::SeqCst) != job_version {
+                if hashes_this_batch > 0 {
+                    stats.record_hashes(hashes_this_batch);
+                }
                 return Ok(());
             }
             set_nonce(&mut tail, nonce);
@@ -327,8 +336,18 @@ fn mine_job(
                 };
                 let _ = share_tx.send(submission);
             }
+            
+            hashes_this_batch += 1;
+            if hashes_this_batch >= BATCH_SIZE {
+                stats.record_hashes(hashes_this_batch);
+                hashes_this_batch = 0;
+            }
+            
             nonce = nonce.wrapping_add(1);
             if nonce == 0 {
+                if hashes_this_batch > 0 {
+                    stats.record_hashes(hashes_this_batch);
+                }
                 break;
             }
         }

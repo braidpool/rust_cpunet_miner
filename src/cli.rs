@@ -39,7 +39,7 @@ pub struct Cli {
     /// Port for the HTTP API server 
     #[arg(long = "api-port", value_name = "PORT", default_value_t = 8080)]
     pub api_port: u16,
-    #[arg(long = "api-bind", value_name = "ADDRESS", default_value = "0.0.0.0")]
+    #[arg(long = "api-bind", value_name = "ADDRESS", default_value = "127.0.0.1")]
     pub api_bind: String,
     #[arg(long = "miner-id", value_name = "ID")]
     pub miner_id: Option<String>,

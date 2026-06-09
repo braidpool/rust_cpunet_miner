@@ -11,6 +11,7 @@ use serde_json::json;
 use tower_http::cors::{Any, CorsLayer};
 
 use crate::mining::MiningCoordinator;
+use crate::stats::MiningStatsSnapshot;
 
 pub struct ApiServer {
     coordinator: Arc<MiningCoordinator>,
@@ -28,17 +29,10 @@ impl ApiServer {
     }
 
     pub async fn serve(self) -> Result<(), Box<dyn std::error::Error>> {
-        let is_localhost = self.bind_address == "127.0.0.1" || self.bind_address == "localhost";
-        let cors = if is_localhost {
-            CorsLayer::new()
-                .allow_origin(Any)
-                .allow_methods(Any)
-                .allow_headers(Any)
-        } else {
-            CorsLayer::new()
-                .allow_methods([axum::http::Method::GET])
-                .allow_headers(Any)
-        };
+        let cors = CorsLayer::new()
+            .allow_origin(Any)
+            .allow_methods([axum::http::Method::GET])
+            .allow_headers(Any);
 
         let app = Router::new()
             .route("/", get(root))
@@ -78,8 +72,8 @@ async fn root() -> impl IntoResponse {
 }
 
 async fn get_stats(State(coordinator): State<Arc<MiningCoordinator>>) -> Response {
-    match coordinator.get_stats_json() {
-        Ok(json) => (StatusCode::OK, json).into_response(),
+    match coordinator.get_stats_snapshot() {
+        Ok(snapshot) => Json(snapshot).into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({

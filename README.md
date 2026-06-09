@@ -28,7 +28,7 @@ cargo run --release -- \
 - `-D, --debug`: Print detailed debug output (including hash preimages when shares are found).
 - `-f, --fudge <FACTOR>`: Scale the pool difficulty/target before submitting shares (useful for debugging).
 - `--api-port <PORT>`: HTTP API server port (default: `8080`).
-- `--api-bind <ADDRESS>`: HTTP API bind address (default: `0.0.0.0`).
+- `--api-bind <ADDRESS>`: HTTP API bind address (default: `127.0.0.1`). Use `0.0.0.0` to expose externally.
 - `--miner-id <ID>`: Unique miner identifier (auto-generated UUID if not provided).
 - `--share-history <COUNT>`: Number of recent shares to keep in memory (default: `100`).
 
