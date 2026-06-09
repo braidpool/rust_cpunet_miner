@@ -31,6 +31,7 @@ struct StatsState {
     username: String,
     threads: usize,
     difficulty: f64,
+    miner_id: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -57,6 +58,8 @@ pub enum ConnectionStatus {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MiningStatsSnapshot {
+    pub miner_id: String,
+    pub miner_version: String,
     pub uptime_seconds: u64,
     pub hashrate: HashrateInfo,
     pub shares: ShareStats,
@@ -118,11 +121,10 @@ pub struct JobInfo {
 pub struct WorkerInfo {
     pub id: usize,
     pub status: String,
-    pub hashes_computed: u64,
 }
 
 impl MiningStats {
-    pub fn new(pool_url: String, username: String, threads: usize, share_history_size: usize) -> Self {
+    pub fn new(pool_url: String, username: String, threads: usize, share_history_size: usize, miner_id: String) -> Self {
         MiningStats {
             inner: Arc::new(StatsInner {
                 start_time: Instant::now(),
@@ -141,21 +143,18 @@ impl MiningStats {
                     username,
                     threads,
                     difficulty: 1.0,
+                    miner_id,
                 }),
             }),
         }
     }
 
-    #[allow(dead_code)]
     pub fn record_hashes(&self, count: u64) {
         self.inner.hashes_computed.fetch_add(count, Ordering::Relaxed);
     }
 
     pub fn record_share_submitted(&self, share: &ShareSubmission) {
         self.inner.shares_submitted.fetch_add(1, Ordering::Relaxed);
-        if share.is_block_candidate {
-            self.inner.blocks_found.fetch_add(1, Ordering::Relaxed);
-        }
 
         let mut state = self.inner.state.lock().unwrap();
         let timestamp = chrono::Utc::now().to_rfc3339();
@@ -180,6 +179,9 @@ impl MiningStats {
         let mut state = self.inner.state.lock().unwrap();
         if let Some(last_share) = state.recent_shares.last_mut() {
             last_share.accepted = true;
+            if last_share.is_block_candidate {
+                self.inner.blocks_found.fetch_add(1, Ordering::Relaxed);
+            }
         }
     }
 
@@ -197,13 +199,11 @@ impl MiningStats {
         state.subscription = Some(subscription);
     }
 
-    #[allow(dead_code)]
     pub fn update_connection_status(&self, status: ConnectionStatus) {
         let mut state = self.inner.state.lock().unwrap();
         state.connection_status = status;
     }
 
-    #[allow(dead_code)]
     pub fn update_difficulty(&self, difficulty: f64) {
         let mut state = self.inner.state.lock().unwrap();
         state.difficulty = difficulty;
@@ -250,11 +250,12 @@ impl MiningStats {
             .map(|id| WorkerInfo {
                 id,
                 status: "mining".to_string(),
-                hashes_computed: hashes / state.threads as u64,
             })
             .collect();
 
         MiningStatsSnapshot {
+            miner_id: state.miner_id.clone(),
+            miner_version: env!("CARGO_PKG_VERSION").to_string(),
             uptime_seconds,
             hashrate: HashrateInfo {
                 current_khash_s: hashrate,

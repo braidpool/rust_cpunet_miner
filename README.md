@@ -10,6 +10,7 @@ preimage), and uses the midstate optimisation to accelerate hashing on the CPU.
 - CPUNet hashing (double SHA-256 of `header || "cpunet\0"`) implemented with midstate reuse.
 - Share submission tracking and basic logging for accepted/rejected shares.
 - Benchmark mode to measure CPUNet hash performance.
+- **HTTP API** with versioned endpoints for monitoring and integration.
 
 ## Usage
 ```bash
@@ -26,6 +27,27 @@ cargo run --release -- \
 - `--benchmark`: Run the hashing benchmark and exit.
 - `-D, --debug`: Print detailed debug output (including hash preimages when shares are found).
 - `-f, --fudge <FACTOR>`: Scale the pool difficulty/target before submitting shares (useful for debugging).
+- `--api-port <PORT>`: HTTP API server port (default: `8080`).
+- `--api-bind <ADDRESS>`: HTTP API bind address (default: `0.0.0.0`).
+- `--miner-id <ID>`: Unique miner identifier (auto-generated UUID if not provided).
+- `--share-history <COUNT>`: Number of recent shares to keep in memory (default: `100`).
+
+## HTTP API
+
+The miner exposes a REST API for monitoring and integration with dashboards.
+
+### Endpoints
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/` | GET | API info and available endpoints |
+| `/api/v1/stats` | GET | Full miner statistics (JSON) |
+| `/api/v1/health` | GET | Health check with connection status |
+
+### Example: Get Stats
+```bash
+curl http://localhost:8080/api/v1/stats
+```
 
 ## Development Notes
 - The miner relies on the [`braidpool/rust-bitcoin`](https://github.com/braidpool/rust-bitcoin) fork, which

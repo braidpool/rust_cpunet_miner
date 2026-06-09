@@ -18,3 +18,4 @@ url = "2.4"
 chrono = { version = "0.4", features = ["serde"] }
 axum = "0.7"
 tower-http = { version = "0.5", features = ["cors"] }
+uuid = { version = "1.8", features = ["v4"] }

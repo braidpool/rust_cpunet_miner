@@ -117,7 +117,8 @@ impl MiningCoordinator {
         let pool_url = config.pool_url.clone().unwrap_or_else(|| "unknown".to_string());
         let username = config.username.clone().unwrap_or_else(|| "miner".to_string());
         let threads = config.threads.get();
-        let stats = MiningStats::new(pool_url, username, threads, config.share_history_size);
+        let miner_id = config.miner_id.clone();
+        let stats = MiningStats::new(pool_url, username, threads, config.share_history_size, miner_id);
 
         let coordinator = MiningCoordinator {
             inner: Arc::new(CoordinatorInner {
@@ -224,6 +225,10 @@ impl MiningCoordinator {
     pub fn get_stats_json(&self) -> Result<String> {
         self.inner.stats.get_json()
             .map_err(|e| anyhow!("failed to serialize stats: {}", e))
+    }
+
+    pub fn get_stats_snapshot(&self) -> Result<crate::stats::MiningStatsSnapshot> {
+        Ok(self.inner.stats.get_snapshot())
     }
 }
 

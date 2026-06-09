@@ -27,8 +27,9 @@ async fn main() -> Result<()> {
     
     // API server in background
     let api_coordinator = coordinator.clone();
+    let api_bind_clone = api_bind.clone();
     let api_handle = tokio::spawn(async move {
-        let api_server = ApiServer::new(api_coordinator, api_port, api_bind);
+        let api_server = ApiServer::new(api_coordinator, api_port, api_bind_clone);
         if let Err(e) = api_server.serve().await {
             eprintln!("API server error: {}", e);
         }
@@ -41,7 +42,7 @@ async fn main() -> Result<()> {
         Err(e) => {
             // Connection failed, but keep API server running
             eprintln!("Warning: Failed to connect to pool: {}", e);
-            eprintln!("API server is still running on http://{}:{}", config.api_bind, api_port);
+            eprintln!("API server is still running on http://{}:{}", api_bind, api_port);
             api_handle.await.map_err(|e| anyhow::anyhow!("API server task failed: {}", e))?;
             Ok(())
         }
