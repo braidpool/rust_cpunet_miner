@@ -49,6 +49,8 @@ pub struct Cli {
     pub benchmark_duration: u64,
     #[arg(long = "pool-timeout", value_name = "SECONDS", default_value_t = 10)]
     pub pool_timeout: u64,
+    #[arg(long = "cors-origin", value_name = "ORIGIN")]
+    pub cors_origin: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -66,6 +68,7 @@ pub struct Config {
     pub share_history_size: usize,
     pub benchmark_duration: u64,
     pub pool_timeout: u64,
+    pub cors_origin: Option<String>,
 }
 
 impl Cli {
@@ -110,6 +113,12 @@ impl Cli {
         if self.fudge <= 0.0 || !self.fudge.is_finite() {
             return Err(anyhow!("fudge factor (-f/--fudge) must be positive"));
         }
+        if self.pool_timeout == 0 {
+            return Err(anyhow!("--pool-timeout must be greater than 0"));
+        }
+        if self.benchmark_duration == 0 {
+            return Err(anyhow!("--bench-duration must be greater than 0"));
+        }
         let miner_id = self.miner_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
         Ok(Config {
@@ -126,6 +135,7 @@ impl Cli {
             share_history_size: self.share_history_size,
             benchmark_duration: self.benchmark_duration,
             pool_timeout: self.pool_timeout,
+            cors_origin: self.cors_origin,
         })
     }
 }

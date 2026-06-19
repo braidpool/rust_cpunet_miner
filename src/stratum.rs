@@ -249,7 +249,7 @@ impl StratumClient {
                     .unwrap_or(false);
                 let hash_hex = hex::encode(meta.hash);
                 if accepted {
-                    self.coordinator.get_stats().record_share_accepted();
+                    self.coordinator.get_stats().record_share_accepted(&meta.nonce, &meta.job_id);
                     if meta.is_block {
                         println!(
                             "Block candidate accepted! job={} nonce={} extranonce2={} hash={}",
@@ -262,7 +262,7 @@ impl StratumClient {
                         );
                     }
                 } else {
-                    self.coordinator.get_stats().record_share_rejected();
+                    self.coordinator.get_stats().record_share_rejected(&meta.nonce, &meta.job_id);
                     let error_msg = message
                         .get("error")
                         .and_then(|e| e[1].as_str())
@@ -304,6 +304,7 @@ impl StratumClient {
                         );
                     }
                     self.coordinator.update_share_target(target);
+                    self.coordinator.get_stats().update_difficulty(difficulty);
                 }
             }
             "mining.set_extranonce" => {

@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use axum::{
     extract::State,
-    http::StatusCode,
+    http::{HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     routing::get,
     Json, Router,
@@ -11,28 +11,39 @@ use serde_json::json;
 use tower_http::cors::{Any, CorsLayer};
 
 use crate::mining::MiningCoordinator;
-use crate::stats::MiningStatsSnapshot;
 
 pub struct ApiServer {
     coordinator: Arc<MiningCoordinator>,
     port: u16,
     bind_address: String,
+    cors_origin: Option<String>,
 }
 
 impl ApiServer {
-    pub fn new(coordinator: MiningCoordinator, port: u16, bind_address: String) -> Self {
+    pub fn new(coordinator: MiningCoordinator, port: u16, bind_address: String, cors_origin: Option<String>) -> Self {
         ApiServer {
             coordinator: Arc::new(coordinator),
             port,
             bind_address,
+            cors_origin,
         }
     }
 
     pub async fn serve(self) -> Result<(), Box<dyn std::error::Error>> {
-        let cors = CorsLayer::new()
-            .allow_origin(Any)
-            .allow_methods([axum::http::Method::GET])
-            .allow_headers(Any);
+        let cors = match self.cors_origin.as_deref() {
+            None => CorsLayer::new(),
+            Some("*") => CorsLayer::new()
+                .allow_origin(Any)
+                .allow_methods([axum::http::Method::GET]),
+            Some(origin) => {
+                let header_val = origin
+                    .parse::<HeaderValue>()
+                    .map_err(|e| format!("invalid --cors-origin value: {e}"))?;
+                CorsLayer::new()
+                    .allow_origin(header_val)
+                    .allow_methods([axum::http::Method::GET])
+            }
+        };
 
         let app = Router::new()
             .route("/", get(root))

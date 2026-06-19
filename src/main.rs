@@ -23,13 +23,14 @@ async fn main() -> Result<()> {
 
     let api_port = config.api_port;
     let api_bind = config.api_bind.clone();
+    let cors_origin = config.cors_origin.clone();
     let coordinator = MiningCoordinator::new(config.clone())?;
     
     // API server in background
     let api_coordinator = coordinator.clone();
     let api_bind_clone = api_bind.clone();
     let api_handle = tokio::spawn(async move {
-        let api_server = ApiServer::new(api_coordinator, api_port, api_bind_clone);
+        let api_server = ApiServer::new(api_coordinator, api_port, api_bind_clone, cors_origin);
         if let Err(e) = api_server.serve().await {
             eprintln!("API server error: {}", e);
         }

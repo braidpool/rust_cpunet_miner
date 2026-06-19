@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -25,7 +26,7 @@ struct StatsInner {
 struct StatsState {
     current_job: Option<JobTemplate>,
     subscription: Option<Subscription>,
-    recent_shares: Vec<ShareRecord>,
+    recent_shares: VecDeque<ShareRecord>,
     connection_status: ConnectionStatus,
     pool_url: String,
     username: String,
@@ -137,7 +138,7 @@ impl MiningStats {
                 state: Mutex::new(StatsState {
                     current_job: None,
                     subscription: None,
-                    recent_shares: Vec::new(),
+                    recent_shares: VecDeque::new(),
                     connection_status: ConnectionStatus::Disconnected,
                     pool_url,
                     username,
@@ -158,7 +159,7 @@ impl MiningStats {
 
         let mut state = self.inner.state.lock().unwrap();
         let timestamp = chrono::Utc::now().to_rfc3339();
-        state.recent_shares.push(ShareRecord {
+        state.recent_shares.push_back(ShareRecord {
             timestamp,
             job_id: share.job_id.clone(),
             nonce: share.nonce.clone(),
@@ -170,23 +171,29 @@ impl MiningStats {
 
         // Keep only last N shares based on config
         if state.recent_shares.len() > self.inner.share_history_size {
-            state.recent_shares.remove(0);
+            state.recent_shares.pop_front();
         }
     }
 
-    pub fn record_share_accepted(&self) {
+    pub fn record_share_accepted(&self, nonce: &str, job_id: &str) {
         self.inner.shares_accepted.fetch_add(1, Ordering::Relaxed);
         let mut state = self.inner.state.lock().unwrap();
-        if let Some(last_share) = state.recent_shares.last_mut() {
-            last_share.accepted = true;
-            if last_share.is_block_candidate {
+        if let Some(share) = state
+            .recent_shares
+            .iter_mut()
+            .rev()
+            .find(|s| s.nonce == nonce && s.job_id == job_id)
+        {
+            share.accepted = true;
+            if share.is_block_candidate {
                 self.inner.blocks_found.fetch_add(1, Ordering::Relaxed);
             }
         }
     }
 
-    pub fn record_share_rejected(&self) {
+    pub fn record_share_rejected(&self, nonce: &str, job_id: &str) {
         self.inner.shares_rejected.fetch_add(1, Ordering::Relaxed);
+        let _ = (nonce, job_id);
     }
 
     pub fn update_job(&self, job: JobTemplate) {
@@ -279,7 +286,7 @@ impl MiningStats {
             },
             current_job,
             worker_threads,
-            recent_shares: state.recent_shares.clone(),
+            recent_shares: state.recent_shares.iter().cloned().collect(),
         }
     }
 
