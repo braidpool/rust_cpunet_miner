@@ -15,6 +15,7 @@ use crate::mining::{
     apply_fudge_to_target, parse_job_template, share_target_from_difficulty, MiningCoordinator,
     ShareSubmission, Subscription,
 };
+use crate::stats::ConnectionStatus;
 
 pub struct StratumClient {
     coordinator: MiningCoordinator,
@@ -64,10 +65,19 @@ impl StratumClient {
             .ok_or_else(|| anyhow!("pool URL missing host"))?;
         let port = parsed.port().unwrap_or(3333);
 
+        coordinator
+            .get_stats()
+            .update_connection_status(ConnectionStatus::Connecting);
         let addr = format!("{}:{}", host, port);
-        let stream = TcpStream::connect(addr.clone())
-            .await
-            .with_context(|| format!("failed to connect to {addr}"))?;
+        let stream = match TcpStream::connect(addr.clone()).await {
+            Ok(s) => s,
+            Err(e) => {
+                coordinator
+                    .get_stats()
+                    .update_connection_status(ConnectionStatus::Error);
+                return Err(anyhow!("failed to connect to {addr}: {e}"));
+            }
+        };
         stream.set_nodelay(true)?;
 
         let (reader, writer) = stream.into_split();

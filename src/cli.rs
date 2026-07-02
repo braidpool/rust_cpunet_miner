@@ -45,8 +45,6 @@ pub struct Cli {
     pub miner_id: Option<String>,
     #[arg(long = "share-history", value_name = "COUNT", default_value_t = 100)]
     pub share_history_size: usize,
-    #[arg(long = "bench-duration", value_name = "SECONDS", default_value_t = 5)]
-    pub benchmark_duration: u64,
     #[arg(long = "pool-timeout", value_name = "SECONDS", default_value_t = 10)]
     pub pool_timeout: u64,
     #[arg(long = "cors-origin", value_name = "ORIGIN")]
@@ -66,7 +64,6 @@ pub struct Config {
     pub api_bind: String,
     pub miner_id: String,
     pub share_history_size: usize,
-    pub benchmark_duration: u64,
     pub pool_timeout: u64,
     pub cors_origin: Option<String>,
 }
@@ -116,9 +113,6 @@ impl Cli {
         if self.pool_timeout == 0 {
             return Err(anyhow!("--pool-timeout must be greater than 0"));
         }
-        if self.benchmark_duration == 0 {
-            return Err(anyhow!("--bench-duration must be greater than 0"));
-        }
         let miner_id = self.miner_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
         Ok(Config {
@@ -133,7 +127,6 @@ impl Cli {
             api_bind: self.api_bind,
             miner_id,
             share_history_size: self.share_history_size,
-            benchmark_duration: self.benchmark_duration,
             pool_timeout: self.pool_timeout,
             cors_origin: self.cors_origin,
         })

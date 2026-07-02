@@ -482,7 +482,7 @@ pub async fn benchmark(config: &Config) -> Result<()> {
         handles.push(handle);
     }
 
-    let duration = Duration::from_secs(config.benchmark_duration);
+    let duration = Duration::from_secs(5);
     tokio::time::sleep(duration).await;
     stop_flag.store(true, Ordering::Relaxed);
 

@@ -44,7 +44,7 @@ pub struct ShareRecord {
     pub extranonce2: String,
     pub hash: String,
     pub is_block_candidate: bool,
-    pub accepted: bool,
+    pub accepted: Option<bool>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -166,7 +166,7 @@ impl MiningStats {
             extranonce2: share.extranonce2.clone(),
             hash: hex::encode(share.hash),
             is_block_candidate: share.is_block_candidate,
-            accepted: false, // Will be updated when response received
+            accepted: None, 
         });
 
         // Keep only last N shares based on config
@@ -184,7 +184,7 @@ impl MiningStats {
             .rev()
             .find(|s| s.nonce == nonce && s.job_id == job_id)
         {
-            share.accepted = true;
+            share.accepted = Some(true);
             if share.is_block_candidate {
                 self.inner.blocks_found.fetch_add(1, Ordering::Relaxed);
             }
@@ -193,7 +193,15 @@ impl MiningStats {
 
     pub fn record_share_rejected(&self, nonce: &str, job_id: &str) {
         self.inner.shares_rejected.fetch_add(1, Ordering::Relaxed);
-        let _ = (nonce, job_id);
+        let mut state = self.inner.state.lock().unwrap();
+        if let Some(share) = state
+            .recent_shares
+            .iter_mut()
+            .rev()
+            .find(|s| s.nonce == nonce && s.job_id == job_id)
+        {
+            share.accepted = Some(false);
+        }
     }
 
     pub fn update_job(&self, job: JobTemplate) {

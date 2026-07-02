@@ -38,7 +38,7 @@ impl ApiServer {
             Some(origin) => {
                 let header_val = origin
                     .parse::<HeaderValue>()
-                    .map_err(|e| format!("invalid --cors-origin value: {e}"))?;
+                    .map_err(|e| anyhow::anyhow!("invalid --cors-origin value: {e}"))?;
                 CorsLayer::new()
                     .allow_origin(header_val)
                     .allow_methods([axum::http::Method::GET])
