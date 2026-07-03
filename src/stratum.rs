@@ -156,6 +156,7 @@ impl StratumClient {
         };
 
         client.perform_handshake().await?;
+        client.coordinator.get_stats().update_connection_status(ConnectionStatus::Connected);
         Ok(client)
     }
 
