@@ -13,10 +13,12 @@ use bitcoin::BlockTime;
 use num_bigint::{BigInt, BigUint};
 use num_rational::BigRational;
 use num_traits::Zero;
+use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 
 use crate::cli::Config;
 use crate::hashing::{hash_from_midstate, midstate_from_prefix, CPUNET_SUFFIX};
+use crate::stats::MiningStats;
 
 #[derive(Clone)]
 pub struct MiningCoordinator {
@@ -29,9 +31,11 @@ struct CoordinatorInner {
     share_tx: UnboundedSender<ShareSubmission>,
     share_rx: Mutex<Option<UnboundedReceiver<ShareSubmission>>>,
     workers: Mutex<Vec<thread::JoinHandle<()>>>,
+    stats: MiningStats,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct JobTemplate {
     pub job_id: String,
     pub version: Version,
@@ -45,13 +49,15 @@ pub struct JobTemplate {
     pub network_target: Target,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Subscription {
     pub extranonce1: Vec<u8>,
     pub extranonce2_size: usize,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ShareSubmission {
     pub job_id: String,
     pub extranonce2: String,
@@ -108,6 +114,12 @@ impl MiningCoordinator {
             version: AtomicU64::new(0),
         });
 
+        let pool_url = config.pool_url.clone().unwrap_or_else(|| "unknown".to_string());
+        let username = config.username.clone().unwrap_or_else(|| "miner".to_string());
+        let threads = config.threads.get();
+        let miner_id = config.miner_id.clone();
+        let stats = MiningStats::new(pool_url, username, threads, config.share_history_size, miner_id);
+
         let coordinator = MiningCoordinator {
             inner: Arc::new(CoordinatorInner {
                 config: config.clone(),
@@ -115,6 +127,7 @@ impl MiningCoordinator {
                 share_tx,
                 share_rx: Mutex::new(Some(share_rx)),
                 workers: Mutex::new(Vec::new()),
+                stats,
             }),
         };
 
@@ -131,9 +144,10 @@ impl MiningCoordinator {
         for id in 0..thread_count {
             let shared = self.inner.shared.clone();
             let share_tx = self.inner.share_tx.clone();
+            let stats = self.inner.stats.clone();
             let handle = thread::Builder::new()
                 .name(format!("miner-{id}"))
-                .spawn(move || worker_loop(id, shared, share_tx))
+                .spawn(move || worker_loop(id, shared, share_tx, stats))
                 .map_err(|e| anyhow!("failed to spawn worker thread: {e}"))?;
             workers.push(handle);
         }
@@ -153,6 +167,7 @@ impl MiningCoordinator {
         let debug = self.inner.config.debug;
         let mut guard = self.inner.shared.inner.lock().unwrap();
         guard.subscription = Some(subscription.clone());
+        self.inner.stats.update_subscription(subscription.clone());
         if let Some(job) = guard.active_job.take() {
             let new_job = JobContext::new(
                 job.template.clone(),
@@ -188,6 +203,7 @@ impl MiningCoordinator {
     pub fn install_job(&self, template: JobTemplate) {
         let debug = self.inner.config.debug;
         let mut guard = self.inner.shared.inner.lock().unwrap();
+        self.inner.stats.update_job(template.clone());
         if let Some(subscription) = guard.subscription.clone() {
             let job = JobContext::new(template, subscription, guard.share_target, debug);
             guard.active_job = Some(Arc::new(job));
@@ -202,9 +218,23 @@ impl MiningCoordinator {
         self.inner.shared.version.fetch_add(1, Ordering::SeqCst);
         self.inner.shared.notify.notify_all();
     }
+
+    pub fn get_stats(&self) -> &MiningStats {
+        &self.inner.stats
+    }
+
+    #[allow(dead_code)]
+    pub fn get_stats_json(&self) -> Result<String> {
+        self.inner.stats.get_json()
+            .map_err(|e| anyhow!("failed to serialize stats: {}", e))
+    }
+
+    pub fn get_stats_snapshot(&self) -> Result<crate::stats::MiningStatsSnapshot> {
+        Ok(self.inner.stats.get_snapshot())
+    }
 }
 
-fn worker_loop(id: usize, shared: Arc<SharedState>, share_tx: UnboundedSender<ShareSubmission>) {
+fn worker_loop(id: usize, shared: Arc<SharedState>, share_tx: UnboundedSender<ShareSubmission>, stats: MiningStats) {
     let mut seen_version = shared.version.load(Ordering::SeqCst);
     loop {
         let (job, job_version) = {
@@ -224,7 +254,7 @@ fn worker_loop(id: usize, shared: Arc<SharedState>, share_tx: UnboundedSender<Sh
             }
         };
 
-        if let Err(err) = mine_job(id, job, job_version, &shared, &share_tx) {
+        if let Err(err) = mine_job(id, job, job_version, &shared, &share_tx, &stats) {
             eprintln!("[worker {id}] mining error: {err:?}");
             thread::sleep(Duration::from_secs(1));
         }
@@ -237,6 +267,7 @@ fn mine_job(
     job_version: u64,
     shared: &Arc<SharedState>,
     share_tx: &UnboundedSender<ShareSubmission>,
+    stats: &MiningStats,
 ) -> Result<()> {
     loop {
         if shared.version.load(Ordering::SeqCst) != job_version {
@@ -267,8 +298,14 @@ fn mine_job(
         let job_id = job.template.job_id.clone();
 
         let mut nonce: u32 = 0;
+        let mut hashes_this_batch: u64 = 0;
+        const BATCH_SIZE: u64 = 1_000_000; 
+        
         loop {
             if shared.version.load(Ordering::SeqCst) != job_version {
+                if hashes_this_batch > 0 {
+                    stats.record_hashes(hashes_this_batch);
+                }
                 return Ok(());
             }
             set_nonce(&mut tail, nonce);
@@ -299,8 +336,18 @@ fn mine_job(
                 };
                 let _ = share_tx.send(submission);
             }
+            
+            hashes_this_batch += 1;
+            if hashes_this_batch >= BATCH_SIZE {
+                stats.record_hashes(hashes_this_batch);
+                hashes_this_batch = 0;
+            }
+            
             nonce = nonce.wrapping_add(1);
             if nonce == 0 {
+                if hashes_this_batch > 0 {
+                    stats.record_hashes(hashes_this_batch);
+                }
                 break;
             }
         }

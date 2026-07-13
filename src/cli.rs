@@ -35,6 +35,20 @@ pub struct Cli {
         default_value_t = 1.0
     )]
     pub fudge: f64,
+
+    /// Port for the HTTP API server 
+    #[arg(long = "api-port", value_name = "PORT", default_value_t = 8080)]
+    pub api_port: u16,
+    #[arg(long = "api-bind", value_name = "ADDRESS", default_value = "127.0.0.1")]
+    pub api_bind: String,
+    #[arg(long = "miner-id", value_name = "ID")]
+    pub miner_id: Option<String>,
+    #[arg(long = "share-history", value_name = "COUNT", default_value_t = 100)]
+    pub share_history_size: usize,
+    #[arg(long = "pool-timeout", value_name = "SECONDS", default_value_t = 10)]
+    pub pool_timeout: u64,
+    #[arg(long = "cors-origin", value_name = "ORIGIN")]
+    pub cors_origin: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -46,6 +60,12 @@ pub struct Config {
     pub benchmark: bool,
     pub debug: bool,
     pub fudge: f64,
+    pub api_port: u16,
+    pub api_bind: String,
+    pub miner_id: String,
+    pub share_history_size: usize,
+    pub pool_timeout: u64,
+    pub cors_origin: Option<String>,
 }
 
 impl Cli {
@@ -90,6 +110,10 @@ impl Cli {
         if self.fudge <= 0.0 || !self.fudge.is_finite() {
             return Err(anyhow!("fudge factor (-f/--fudge) must be positive"));
         }
+        if self.pool_timeout == 0 {
+            return Err(anyhow!("--pool-timeout must be greater than 0"));
+        }
+        let miner_id = self.miner_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
         Ok(Config {
             pool_url: self.pool_url,
@@ -99,6 +123,12 @@ impl Cli {
             benchmark: self.benchmark,
             debug: self.debug,
             fudge: self.fudge,
+            api_port: self.api_port,
+            api_bind: self.api_bind,
+            miner_id,
+            share_history_size: self.share_history_size,
+            pool_timeout: self.pool_timeout,
+            cors_origin: self.cors_origin,
         })
     }
 }

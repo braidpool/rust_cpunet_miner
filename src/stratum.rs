@@ -15,8 +15,7 @@ use crate::mining::{
     apply_fudge_to_target, parse_job_template, share_target_from_difficulty, MiningCoordinator,
     ShareSubmission, Subscription,
 };
-
-const SUBSCRIBE_TIMEOUT: Duration = Duration::from_secs(10);
+use crate::stats::ConnectionStatus;
 
 pub struct StratumClient {
     coordinator: MiningCoordinator,
@@ -29,6 +28,7 @@ pub struct StratumClient {
     pending: HashMap<u64, PendingRequest>,
     debug: bool,
     fudge: f64,
+    pool_timeout: Duration,
 }
 
 enum PendingRequest {
@@ -54,6 +54,7 @@ impl StratumClient {
         let share_rx = coordinator.take_share_receiver()?;
         let debug = config.debug;
         let fudge = config.fudge;
+        let pool_timeout = Duration::from_secs(config.pool_timeout);
 
         let parsed = Url::parse(&pool_url).context("invalid pool URL")?;
         if parsed.scheme() != "stratum+tcp" {
@@ -64,10 +65,19 @@ impl StratumClient {
             .ok_or_else(|| anyhow!("pool URL missing host"))?;
         let port = parsed.port().unwrap_or(3333);
 
+        coordinator
+            .get_stats()
+            .update_connection_status(ConnectionStatus::Connecting);
         let addr = format!("{}:{}", host, port);
-        let stream = TcpStream::connect(addr.clone())
-            .await
-            .with_context(|| format!("failed to connect to {addr}"))?;
+        let stream = match TcpStream::connect(addr.clone()).await {
+            Ok(s) => s,
+            Err(e) => {
+                coordinator
+                    .get_stats()
+                    .update_connection_status(ConnectionStatus::Error);
+                return Err(anyhow!("failed to connect to {addr}: {e}"));
+            }
+        };
         stream.set_nodelay(true)?;
 
         let (reader, writer) = stream.into_split();
@@ -142,9 +152,11 @@ impl StratumClient {
             pending: HashMap::new(),
             debug,
             fudge,
+            pool_timeout,
         };
 
         client.perform_handshake().await?;
+        client.coordinator.get_stats().update_connection_status(ConnectionStatus::Connected);
         Ok(client)
     }
 
@@ -190,7 +202,7 @@ impl StratumClient {
 
     async fn wait_for_response(&mut self, request_id: u64) -> Result<Value> {
         loop {
-            let message = timeout(SUBSCRIBE_TIMEOUT, self.inbound.recv())
+            let message = timeout(self.pool_timeout, self.inbound.recv())
                 .await
                 .map_err(|_| anyhow!("timeout waiting for stratum response"))?
                 .ok_or_else(|| anyhow!("stratum connection closed during handshake"))?;
@@ -248,6 +260,7 @@ impl StratumClient {
                     .unwrap_or(false);
                 let hash_hex = hex::encode(meta.hash);
                 if accepted {
+                    self.coordinator.get_stats().record_share_accepted(&meta.nonce, &meta.job_id);
                     if meta.is_block {
                         println!(
                             "Block candidate accepted! job={} nonce={} extranonce2={} hash={}",
@@ -260,6 +273,7 @@ impl StratumClient {
                         );
                     }
                 } else {
+                    self.coordinator.get_stats().record_share_rejected(&meta.nonce, &meta.job_id);
                     let error_msg = message
                         .get("error")
                         .and_then(|e| e[1].as_str())
@@ -301,6 +315,7 @@ impl StratumClient {
                         );
                     }
                     self.coordinator.update_share_target(target);
+                    self.coordinator.get_stats().update_difficulty(difficulty);
                 }
             }
             "mining.set_extranonce" => {
@@ -376,6 +391,7 @@ impl StratumClient {
 
     async fn submit_share(&mut self, share: ShareSubmission) -> Result<()> {
         let id = self.next_request_id();
+        self.coordinator.get_stats().record_share_submitted(&share);
         let params = vec![
             Value::String(self.username.clone()),
             Value::String(share.job_id.clone()),
